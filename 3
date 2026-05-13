@@ -1,0 +1,466 @@
+Option Explicit
+ 
+Const WS_PARAM    As String = "Parametreler"
+Const WS_GIRIS    As String = "Giris"
+Const WS_VARDIYA  As String = "Vardiya Matrisi"
+Const WS_PLAN     As String = "Vardiya Plani"
+Const WS_GANTT    As String = "Gantt Chart"
+ 
+Const GIRIS_FIRST_ROW As Integer = 4
+Const PLAN_FIRST_ROW  As Integer = 4
+Const GANTT_START_COL As Integer = 5
+Const NUM_SHIFTS      As Integer = 40
+Const ISLEM_COUNT     As Integer = 7
+Const MAX_SHIFTS      As Integer = 290
+ 
+' ================================================================
+' ANA PLAN OLUSTURMA FONKSIYONU
+' ================================================================
+Sub PlanOlustur()
+ 
+   Dim wsParam   As Worksheet
+   Dim wsGiris   As Worksheet
+   Dim wsVardiya As Worksheet
+   Dim wsPlan    As Worksheet
+   Dim wsGantt   As Worksheet
+ 
+   On Error GoTo HataYonetimi
+ 
+   Application.ScreenUpdating = False
+   Application.Calculation = xlCalculationManual
+ 
+   ' Sayfa kontrolu
+   If Not SayfaVarMi(WS_PARAM) Then
+       MsgBox "'" & WS_PARAM & "' sayfasi bulunamadi!", vbCritical: GoTo Temizle
+   End If
+   If Not SayfaVarMi(WS_GIRIS) Then
+       MsgBox "'" & WS_GIRIS & "' sayfasi bulunamadi!", vbCritical: GoTo Temizle
+   End If
+   If Not SayfaVarMi(WS_PLAN) Then
+       MsgBox "'" & WS_PLAN & "' sayfasi bulunamadi!", vbCritical: GoTo Temizle
+   End If
+   If Not SayfaVarMi(WS_GANTT) Then
+       MsgBox "'" & WS_GANTT & "' sayfasi bulunamadi!", vbCritical: GoTo Temizle
+   End If
+ 
+   Set wsParam = ThisWorkbook.Sheets(WS_PARAM)
+   Set wsGiris = ThisWorkbook.Sheets(WS_GIRIS)
+   Set wsPlan  = ThisWorkbook.Sheets(WS_PLAN)
+   Set wsGantt = ThisWorkbook.Sheets(WS_GANTT)
+ 
+   Dim vardiyaMatrisVar As Boolean
+   vardiyaMatrisVar = SayfaVarMi(WS_VARDIYA)
+   If vardiyaMatrisVar Then Set wsVardiya = ThisWorkbook.Sheets(WS_VARDIYA)
+ 
+   ' ── Parametreleri oku ──────────────────────────────────────
+   Dim alanKap   As Integer: alanKap   = CInt(wsParam.Range("B5").Value)
+   Dim kabinKap  As Integer: kabinKap  = CInt(wsParam.Range("B6").Value)
+   Dim normalVar As Integer: normalVar = CInt(wsParam.Range("B7").Value)
+   Dim acilVar   As Integer: acilVar   = CInt(wsParam.Range("B8").Value)
+ 
+   If alanKap < 1 Then alanKap = 6
+   If kabinKap < 1 Then kabinKap = 2
+   If normalVar < 1 Then normalVar = 2
+   If acilVar < 1 Then acilVar = 3
+ 
+   ' ── Islem surelerini oku ──────────────────────────────────
+   Dim islemAdi(1 To 7)   As String
+   Dim islemSure(1 To 7)  As Integer
+   Dim islemKonum(1 To 7) As String
+   Dim i As Integer
+   For i = 1 To ISLEM_COUNT
+       islemAdi(i)   = CStr(wsParam.Cells(11 + i, 1).Value)
+       islemSure(i)  = CInt(wsParam.Cells(11 + i, 2).Value)
+       islemKonum(i) = CStr(wsParam.Cells(11 + i, 3).Value)
+       If islemSure(i) < 1 Then islemSure(i) = 1
+   Next i
+ 
+   ' ── Ucak listesini oku ────────────────────────────────────
+   Dim ucakSay As Integer: ucakSay = 0
+   Dim r As Integer: r = GIRIS_FIRST_ROW
+   Do While Trim(CStr(wsGiris.Cells(r, 2).Value)) <> ""
+       ucakSay = ucakSay + 1
+       r = r + 1
+       If r > 200 Then Exit Do
+   Loop
+ 
+   If ucakSay = 0 Then
+       MsgBox "Giris sayfasinda ucak bulunamadi!", vbExclamation
+       GoTo Temizle
+   End If
+ 
+   Dim ucakNo(1 To 50)    As String
+   Dim gelisVar(1 To 50)  As Integer
+   Dim teslimVar(1 To 50) As Integer
+   Dim oncelik(1 To 50)   As Integer
+   Dim krizModu(1 To 50)  As Boolean
+   Dim gelisDateArr(1 To 50) As Date  ' Gantt baslik icin saklayalim
+ 
+   Dim refDate As Date: refDate = CDate("01.01.2025")
+   Dim enErkenGelisDate As Date: enErkenGelisDate = CDate("31.12.2099")
+ 
+   For i = 1 To ucakSay
+       r = GIRIS_FIRST_ROW + i - 1
+       ucakNo(i) = CStr(wsGiris.Cells(r, 2).Value)
+ 
+       Dim gelisRaw  As String: gelisRaw  = CStr(wsGiris.Cells(r, 3).Value)
+       Dim teslimRaw As String: teslimRaw = CStr(wsGiris.Cells(r, 4).Value)
+ 
+       Dim gelisDate  As Date
+       Dim teslimDate As Date
+ 
+       On Error Resume Next
+       gelisDate  = CDate(gelisRaw)
+       teslimDate = CDate(teslimRaw)
+       On Error GoTo HataYonetimi
+ 
+       If gelisDate = 0 Then
+           MsgBox ucakNo(i) & " icin gecerli giris tarihi yok: " & gelisRaw, vbExclamation
+           GoTo Temizle
+       End If
+       If teslimDate = 0 Then
+           MsgBox ucakNo(i) & " icin gecerli teslim tarihi yok: " & teslimRaw, vbExclamation
+           GoTo Temizle
+       End If
+ 
+       gelisDateArr(i) = gelisDate
+       If gelisDate < enErkenGelisDate Then enErkenGelisDate = gelisDate
+ 
+       Dim onc As Integer: onc = 3
+       If IsNumeric(wsGiris.Cells(r, 5).Value) Then onc = CInt(wsGiris.Cells(r, 5).Value)
+       oncelik(i) = onc
+       krizModu(i) = (UCase(Trim(CStr(wsGiris.Cells(r, 6).Value))) = "E")
+ 
+       Dim vpd As Integer: vpd = IIf(krizModu(i), acilVar, normalVar)
+       gelisVar(i)  = DateDiff("d", refDate, gelisDate) * vpd + 1
+       teslimVar(i) = DateDiff("d", refDate, teslimDate) * vpd + vpd
+       If gelisVar(i) < 1 Then gelisVar(i) = 1
+   Next i
+ 
+   ' ── Oncelik sirala ────────────────────────────────────────
+   Dim j As Integer
+   Dim tmpStr As String: Dim tmpInt As Integer: Dim tmpBool As Boolean: Dim tmpDate As Date
+   For i = 1 To ucakSay - 1
+       For j = 1 To ucakSay - i
+           If oncelik(j) > oncelik(j + 1) Then
+               tmpStr  = ucakNo(j):       ucakNo(j)       = ucakNo(j+1):       ucakNo(j+1)       = tmpStr
+               tmpInt  = gelisVar(j):     gelisVar(j)     = gelisVar(j+1):     gelisVar(j+1)     = tmpInt
+               tmpInt  = teslimVar(j):    teslimVar(j)    = teslimVar(j+1):    teslimVar(j+1)    = tmpInt
+               tmpInt  = oncelik(j):      oncelik(j)      = oncelik(j+1):      oncelik(j+1)      = tmpInt
+               tmpBool = krizModu(j):     krizModu(j)     = krizModu(j+1):     krizModu(j+1)     = tmpBool
+               tmpDate = gelisDateArr(j): gelisDateArr(j) = gelisDateArr(j+1): gelisDateArr(j+1) = tmpDate
+           End If
+       Next j
+   Next i
+ 
+   ' ── Kisi kapasitesi ───────────────────────────────────────
+   Dim kisiKap(1 To 300) As Integer
+   For i = 1 To 300
+       kisiKap(i) = alanKap
+       If vardiyaMatrisVar Then
+           Dim mv As Variant: mv = wsVardiya.Cells(3 + i, 5).Value
+           If IsNumeric(mv) And mv > 0 Then kisiKap(i) = CInt(mv)
+       End If
+   Next i
+ 
+   ' ── Alan / Kabin doluluk ──────────────────────────────────
+   Dim alanDolu(1 To 300)  As Integer
+   Dim kabinDolu(1 To 300) As Integer
+   For i = 1 To 300: alanDolu(i) = 0: kabinDolu(i) = 0: Next i
+ 
+   ' ── Sayfalari temizle ─────────────────────────────────────
+   wsPlan.Rows(PLAN_FIRST_ROW & ":" & wsPlan.Rows.Count).ClearContents
+   wsPlan.Rows(PLAN_FIRST_ROW & ":" & wsPlan.Rows.Count).Interior.ColorIndex = xlNone
+   wsGantt.Rows("3:" & wsGantt.Rows.Count).ClearContents
+   wsGantt.Rows("3:" & wsGantt.Rows.Count).Interior.ColorIndex = xlNone
+ 
+   ' ── Gantt Chart basligini guncelle ────────────────────────
+   Call GanttBaslikYaz(wsGantt, enErkenGelisDate, normalVar)
+ 
+   ' ── Renk paleti ──────────────────────────────────────────
+   Dim ucakRenk(1 To 10) As Long
+   ucakRenk(1) = RGB(68, 114, 196):  ucakRenk(2)  = RGB(237, 125, 49)
+   ucakRenk(3) = RGB(112, 173, 71):  ucakRenk(4)  = RGB(192, 0, 0)
+   ucakRenk(5) = RGB(112, 48, 160):  ucakRenk(6)  = RGB(0, 176, 240)
+   ucakRenk(7) = RGB(146, 208, 80):  ucakRenk(8)  = RGB(255, 102, 255)
+   ucakRenk(9) = RGB(0, 112, 192):   ucakRenk(10) = RGB(255, 0, 0)
+ 
+   Dim planRow  As Integer: planRow  = PLAN_FIRST_ROW
+   Dim ganttRow As Integer: ganttRow = 3  ' Satir 1=Tarih, 2=Vardiya, 3'ten itibaren ucaklar
+ 
+   ' ── Her ucak icin planlama ────────────────────────────────
+   For i = 1 To ucakSay
+       Dim vpd2 As Integer: vpd2 = IIf(krizModu(i), acilVar, normalVar)
+       Dim curVar As Integer: curVar = gelisVar(i)
+       Dim renk As Long: renk = ucakRenk(((i - 1) Mod 10) + 1)
+ 
+       Dim islemIdx As Integer
+       For islemIdx = 1 To ISLEM_COUNT
+           Dim sure    As Integer: sure    = islemSure(islemIdx)
+           Dim konum   As String:  konum   = islemKonum(islemIdx)
+           Dim islemAd As String:  islemAd = islemAdi(islemIdx)
+ 
+           Dim secKonum As String
+           If InStr(konum, "/") > 0 Then
+               secKonum = IIf(kabinDolu(curVar) < kabinKap, "Kabin", "Alan")
+           Else
+               secKonum = konum
+           End If
+ 
+           ' Uygun vardiyayi bul
+           Dim vTry As Integer: vTry = curVar
+           Dim found As Boolean: found = False
+           Do While vTry <= MAX_SHIFTS
+               Dim fits As Boolean: fits = True
+               Dim s2 As Integer
+               For s2 = vTry To vTry + sure - 1
+                   If s2 > MAX_SHIFTS Then fits = False: Exit For
+                   If secKonum = "Kabin" Then
+                       If kabinDolu(s2) >= kabinKap Or alanDolu(s2) >= kisiKap(s2) Then
+                           fits = False: Exit For
+                       End If
+                   Else
+                       Dim efKap As Integer
+                       efKap = Application.WorksheetFunction.Min(alanKap, kisiKap(s2))
+                       If alanDolu(s2) >= efKap Then fits = False: Exit For
+                   End If
+               Next s2
+               If fits Then found = True: Exit Do
+               vTry = vTry + 1
+           Loop
+ 
+           If Not found Then
+               MsgBox "Uyari: " & ucakNo(i) & " - " & islemAd & " icin uygun vardiya bulunamadi!", vbExclamation
+               GoTo AtlaIslem
+           End If
+ 
+           ' Doluluk guncelle
+           For s2 = vTry To vTry + sure - 1
+               If secKonum = "Kabin" Then kabinDolu(s2) = kabinDolu(s2) + 1
+               alanDolu(s2) = alanDolu(s2) + 1
+           Next s2
+ 
+           ' ── Vardiya Plani sayfasina yaz ───────────────────
+           Dim vNo2 As Integer
+           For vNo2 = 1 To sure
+               Dim absVar   As Integer: absVar   = vTry + vNo2 - 1
+               Dim gun      As Integer: gun      = Int((absVar - 1) / vpd2) + 1
+               Dim vNo      As Integer: vNo      = ((absVar - 1) Mod vpd2) + 1
+               Dim planTarih As Date:   planTarih = DateAdd("d", gun - 1, refDate)
+ 
+               With wsPlan
+                   .Cells(planRow, 1).Value = planTarih
+                   .Cells(planRow, 1).NumberFormat = "dd.mm.yyyy"
+                   .Cells(planRow, 2).Value = vNo
+                   .Cells(planRow, 3).Value = ucakNo(i)
+                   .Cells(planRow, 4).Value = islemAd
+                   .Cells(planRow, 5).Value = secKonum
+                   .Cells(planRow, 6).Value = sure
+                   .Cells(planRow, 7).Value = ""
+                   .Cells(planRow, 8).Value = oncelik(i)
+                   .Cells(planRow, 9).Value = IIf(krizModu(i), "Kriz", "Normal")
+ 
+                   If secKonum = "Kabin" Then
+                       .Cells(planRow, 5).Interior.Color = RGB(255, 230, 153)
+                   Else
+                       .Cells(planRow, 5).Interior.Color = RGB(198, 239, 206)
+                   End If
+ 
+                   If absVar <= teslimVar(i) Then
+                       .Cells(planRow, 10).Value = "Zamaninda"
+                       .Cells(planRow, 10).Interior.Color = RGB(198, 239, 206)
+                   Else
+                       .Cells(planRow, 10).Value = "GECIKME RISKI!"
+                       .Cells(planRow, 10).Interior.Color = RGB(255, 199, 206)
+                       .Cells(planRow, 10).Font.Bold = True
+                       .Cells(planRow, 10).Font.Color = RGB(192, 0, 0)
+                   End If
+               End With
+               planRow = planRow + 1
+           Next vNo2
+ 
+AtlaIslem:
+           ' ── Gantt Chart'a yaz ─────────────────────────────
+           Dim gRow As Integer: gRow = ganttRow + islemIdx - 1
+           If islemIdx = 1 Then
+               wsGantt.Cells(gRow, 1).Value = ucakNo(i)
+               wsGantt.Cells(gRow, 1).Font.Bold = True
+               wsGantt.Cells(gRow, 1).HorizontalAlignment = xlCenter
+           End If
+           wsGantt.Cells(gRow, 3).Value = islemAd
+           wsGantt.Cells(gRow, 3).Font.Size = 9
+ 
+           Dim gs As Integer
+           For gs = 1 To NUM_SHIFTS
+               Dim gcol As Integer: gcol = GANTT_START_COL + gs - 1
+               If gs >= vTry And gs < vTry + sure Then
+                   wsGantt.Cells(gRow, gcol).Interior.Color = renk
+                   wsGantt.Cells(gRow, gcol).Value = Left(secKonum, 1)
+                   wsGantt.Cells(gRow, gcol).Font.Color = RGB(255, 255, 255)
+                   wsGantt.Cells(gRow, gcol).Font.Bold = True
+                   wsGantt.Cells(gRow, gcol).Font.Size = 7
+                   wsGantt.Cells(gRow, gcol).HorizontalAlignment = xlCenter
+               Else
+                   wsGantt.Cells(gRow, gcol).Interior.ColorIndex = xlNone
+                   wsGantt.Cells(gRow, gcol).Value = ""
+               End If
+           Next gs
+ 
+           curVar = vTry + sure
+       Next islemIdx
+ 
+       ganttRow = ganttRow + ISLEM_COUNT + 1
+ 
+       wsGiris.Cells(GIRIS_FIRST_ROW + i - 1, 7).Value = "Planlandı"
+       wsGiris.Cells(GIRIS_FIRST_ROW + i - 1, 7).Interior.Color = RGB(198, 239, 206)
+   Next i
+ 
+   wsPlan.Columns("A:J").AutoFit
+   wsGantt.Columns("A:D").AutoFit
+ 
+   Application.Calculation = xlCalculationAutomatic
+   Application.ScreenUpdating = True
+ 
+   MsgBox ucakSay & " ucak icin plan basariyla olusturuldu!" & vbNewLine & _
+          "- Vardiya Plani sayfasini kontrol ediniz." & vbNewLine & _
+          "- Gantt Chart sayfasini kontrol ediniz.", vbInformation, "Plan Olusturuldu"
+   Exit Sub
+ 
+HataYonetimi:
+   Application.Calculation = xlCalculationAutomatic
+   Application.ScreenUpdating = True
+   MsgBox "HATA: " & Err.Description & vbNewLine & "Hata No: " & Err.Number, vbCritical, "Makro Hatasi"
+   Exit Sub
+ 
+Temizle:
+   Application.Calculation = xlCalculationAutomatic
+   Application.ScreenUpdating = True
+End Sub
+ 
+' ================================================================
+' GANTT BASLIK YAZ
+' Satir 1: Tarihler (her 2 kolonu birlestir = 1 gun)
+' Satir 2: Vardiya numaralari (V1, V2, V1, V2...)
+' ================================================================
+Sub GanttBaslikYaz(wsGantt As Worksheet, baslangicTarihi As Date, varPerDay As Integer)
+ 
+   Dim gunSay As Integer: gunSay = NUM_SHIFTS / varPerDay
+   Dim dayIdx As Integer
+   Dim col    As Integer
+   Dim tarih  As Date
+ 
+   ' Onceki baslik satirlarini temizle
+   wsGantt.Rows("1:2").ClearContents
+   wsGantt.Rows("1:2").Interior.ColorIndex = xlNone
+   wsGantt.Rows("1:2").UnMerge
+ 
+   ' Sabit kolonlar: UCAK NO ve ISLEM (2 satiri birlestir)
+   Dim fixCols As Variant
+   fixCols = Array(Array(1, "UCAK NO"), Array(3, "ISLEM"))
+   Dim fc As Variant
+   For Each fc In fixCols
+       wsGantt.Range(wsGantt.Cells(1, fc(0)), wsGantt.Cells(2, fc(0) + 1)).Merge
+       With wsGantt.Cells(1, fc(0))
+           .Value = fc(1)
+           .Interior.Color = RGB(31, 56, 100)
+           .Font.Bold = True
+           .Font.Color = RGB(255, 255, 255)
+           .Font.Size = 10
+           .Font.Name = "Arial"
+           .HorizontalAlignment = xlCenter
+           .VerticalAlignment = xlCenter
+       End With
+   Next fc
+ 
+   ' Satir 1: Gunluk tarihler (2 kolonu birlestir)
+   For dayIdx = 0 To gunSay - 1
+       Dim colStart As Integer: colStart = GANTT_START_COL + dayIdx * varPerDay
+       Dim colEnd   As Integer: colEnd   = colStart + varPerDay - 1
+       tarih = baslangicTarihi + dayIdx
+ 
+       If colEnd > GANTT_START_COL + NUM_SHIFTS - 1 Then
+           colEnd = GANTT_START_COL + NUM_SHIFTS - 1
+       End If
+ 
+       If colStart <= GANTT_START_COL + NUM_SHIFTS - 1 Then
+           wsGantt.Range(wsGantt.Cells(1, colStart), wsGantt.Cells(1, colEnd)).Merge
+           With wsGantt.Cells(1, colStart)
+               .Value = Format(tarih, "dd.mm.yy")
+               .Interior.Color = IIf(dayIdx Mod 2 = 0, RGB(31, 56, 100), RGB(46, 117, 182))
+               .Font.Bold = True
+               .Font.Color = RGB(255, 255, 255)
+               .Font.Size = 8
+               .Font.Name = "Arial"
+               .HorizontalAlignment = xlCenter
+               .VerticalAlignment = xlCenter
+           End With
+       End If
+   Next dayIdx
+ 
+   ' Satir 2: Vardiya numaralari
+   Dim s As Integer
+   For s = 0 To NUM_SHIFTS - 1
+       col = GANTT_START_COL + s
+       Dim vno As Integer: vno = (s Mod varPerDay) + 1
+       With wsGantt.Cells(2, col)
+           .Value = "V" & vno
+           .Interior.Color = IIf(vno = 1, RGB(46, 117, 182), RGB(68, 114, 196))
+           .Font.Bold = True
+           .Font.Color = RGB(255, 255, 255)
+           .Font.Size = 8
+           .Font.Name = "Arial"
+           .HorizontalAlignment = xlCenter
+           .VerticalAlignment = xlCenter
+       End With
+   Next s
+ 
+   wsGantt.Rows("1:2").RowHeight = 20
+End Sub
+ 
+' ================================================================
+' YARDIMCI: Sayfa var mi kontrolu
+' ================================================================
+Function SayfaVarMi(sayfaAdi As String) As Boolean
+   Dim ws As Worksheet
+   SayfaVarMi = False
+   For Each ws In ThisWorkbook.Sheets
+       If ws.Name = sayfaAdi Then SayfaVarMi = True: Exit Function
+   Next ws
+End Function
+ 
+' ================================================================
+' YARDIMCI: Plani Temizle
+' ================================================================
+Sub PlaniTemizle()
+   If MsgBox("Mevcut plan silinecek. Emin misiniz?", vbYesNo + vbQuestion) = vbYes Then
+       With ThisWorkbook.Sheets(WS_PLAN)
+           .Rows(PLAN_FIRST_ROW & ":" & .Rows.Count).ClearContents
+           .Rows(PLAN_FIRST_ROW & ":" & .Rows.Count).Interior.ColorIndex = xlNone
+       End With
+       With ThisWorkbook.Sheets(WS_GANTT)
+           .Rows("3:" & .Rows.Count).ClearContents
+           .Rows("3:" & .Rows.Count).Interior.ColorIndex = xlNone
+       End With
+       MsgBox "Plan temizlendi.", vbInformation
+   End If
+End Sub
+ 
+' ================================================================
+' YARDIMCI: Gecikme Kontrolu
+' ================================================================
+Sub GecikmeKontrol()
+   Dim wsPlan As Worksheet: Set wsPlan = ThisWorkbook.Sheets(WS_PLAN)
+   Dim gecikSay As Integer: gecikSay = 0
+   Dim r As Integer: r = PLAN_FIRST_ROW
+   Do While wsPlan.Cells(r, 1).Value <> ""
+       If InStr(wsPlan.Cells(r, 10).Value, "GECIKME") > 0 Then gecikSay = gecikSay + 1
+       r = r + 1
+   Loop
+   If gecikSay = 0 Then
+       MsgBox "Gecikme riski bulunmamaktadir.", vbInformation
+   Else
+       MsgBox gecikSay & " satirda gecikme riski var!" & vbNewLine & _
+              "Kirmizi isaretle satirlari inceleyiniz.", vbExclamation
+   End If
+End Sub
+ 
