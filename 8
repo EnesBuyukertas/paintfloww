@@ -1,0 +1,1265 @@
+Option Explicit
+ 
+' ================================================================
+' BOYAHANE URETIM PLANLAMA MAKROSU v5
+' - Temiz v3 kod yapisi korundu
+' - Kabiliyet ve Vardiya matrisi ayni Excel'den okunuyor
+' - Dinamik zamanlama (tum ucaklar karsilastirilarak en iyi is secilir)
+' - EQP: ayni kisi 2 vardiya zorunlulugu
+' - Dis Boya: Sealant aktifken ayni ucakta yapilamaz
+' - Gantt: 3 satirli baslik (Ay / Tarih / V3-V1-V2)
+' - Sealant: lokasyon degil, 2 vardijalik blok kisit
+' ================================================================
+ 
+Const WS_PARAM   As String = "Parametreler"
+Const WS_GIRIS   As String = "Giris"
+Const WS_KAB     As String = "Kabiliyet Matrisi"
+Const WS_VAR     As String = "Vardiya Matrisi"
+Const WS_PLAN    As String = "Vardiya Plani"
+Const WS_GANTT   As String = "Gantt Chart"
+ 
+Const GIRIS_FIRST_ROW As Long = 4
+Const PLAN_FIRST_ROW  As Long = 4
+Const GANTT_START_COL As Long = 4
+Const KAB_FIRST_ROW   As Long = 4   ' Kabiliyet matrisi veri baslangic satiri
+Const VAR_FIRST_ROW   As Long = 7   ' Vardiya matrisi veri baslangic satiri
+Const VAR_DAY_COL     As Long = 6   ' Vardiya matrisinde ilk gun kolonu
+Const VAR_NAME_COL    As Long = 5   ' Vardiya matrisinde Ad Soyad kolonu (E=5)
+                                        ' A=Grup, B=Bina, C=Vardiya formulu, D=Sicil no, E=Ad Soyad
+ 
+Const DEFAULT_ALAN_KAP  As Long = 6
+Const DEFAULT_KABIN_KAP As Long = 2
+Const MAX_SHIFT         As Long = 1200
+Const GANTT_SHIFTS      As Long = 1095
+Const MAX_AIRCRAFT      As Long = 200
+Const MAX_WORKERS       As Long = 300
+Const MAX_OPS           As Long = 6
+ 
+Const OP_PRIMER  As Long = 1
+Const OP_VERNIK  As Long = 2
+Const OP_VTU     As Long = 3
+Const OP_DISBOYA As Long = 4
+Const OP_EQP     As Long = 5
+Const OP_FINAL   As Long = 6
+ 
+' Islem tanimlari
+Dim OpName(1 To MAX_OPS)  As String
+Dim OpDur(1 To MAX_OPS)   As Long
+Dim OpNeed(1 To MAX_OPS)  As Long
+ 
+' Kapasite
+Dim AlanKap  As Long
+Dim KabinKap As Long
+Dim NormalVarPerDay As Long
+Dim AcilVarPerDay   As Long
+ 
+' Tarihler
+Dim RefDate        As Date   ' En erken ucak gelis tarihi
+Dim VardiyaRefDate As Date   ' Vardiya matrisinin baslangic tarihi
+ 
+' Islem sirasi
+Dim StageOrder(1 To 7) As String
+Dim PrimerOnce     As Boolean
+ 
+' Isci verileri
+Dim WorkerCount As Long
+Dim Workers(1 To MAX_WORKERS)                   As String
+Dim Skill(1 To MAX_WORKERS, 1 To MAX_OPS)       As Boolean
+Dim Avail(1 To MAX_WORKERS, 1 To MAX_SHIFT)     As Boolean
+Dim Busy(1 To MAX_WORKERS, 1 To MAX_SHIFT)      As Boolean
+ 
+' Ucak verileri
+Dim AircraftCount                               As Long
+Dim AircraftNo(1 To MAX_AIRCRAFT)               As String
+Dim ArrivalDate(1 To MAX_AIRCRAFT)              As Date
+Dim DueDate(1 To MAX_AIRCRAFT)                  As Date
+Dim PriorityVal(1 To MAX_AIRCRAFT)              As Long
+Dim ArrivalShift(1 To MAX_AIRCRAFT)             As Long
+Dim DueShift(1 To MAX_AIRCRAFT)                 As Long
+Dim StageIdx(1 To MAX_AIRCRAFT)                 As Long
+Dim ReadyShift(1 To MAX_AIRCRAFT)               As Long
+Dim DoneAircraft(1 To MAX_AIRCRAFT)             As Boolean
+Dim LastLoc(1 To MAX_AIRCRAFT)                  As String
+ 
+' Doluluk ve konum takibi
+Dim AlanDolu(1 To MAX_SHIFT)                    As Long
+Dim KabinDolu(1 To MAX_SHIFT)                   As Long
+Dim AircraftLoc(1 To MAX_AIRCRAFT, 1 To MAX_SHIFT)   As String
+Dim SealantActive(1 To MAX_AIRCRAFT, 1 To MAX_SHIFT) As Boolean
+ 
+Dim PlanRow As Long
+ 
+' ================================================================
+' ANA FONKSİYON
+' ================================================================
+Sub PlanOlustur()
+   On Error GoTo HataYonetimi
+   Application.ScreenUpdating = False
+   Application.Calculation = xlCalculationManual
+ 
+   If Not SayfaVarMi(WS_PARAM)  Then MsgBox "'" & WS_PARAM  & "' sayfasi bulunamadi!", vbCritical: GoTo Temizle
+   If Not SayfaVarMi(WS_GIRIS)  Then MsgBox "'" & WS_GIRIS  & "' sayfasi bulunamadi!", vbCritical: GoTo Temizle
+   If Not SayfaVarMi(WS_KAB)    Then MsgBox "'" & WS_KAB    & "' sayfasi bulunamadi!", vbCritical: GoTo Temizle
+   If Not SayfaVarMi(WS_VAR)    Then MsgBox "'" & WS_VAR    & "' sayfasi bulunamadi!", vbCritical: GoTo Temizle
+   If Not SayfaVarMi(WS_PLAN)   Then MsgBox "'" & WS_PLAN   & "' sayfasi bulunamadi!", vbCritical: GoTo Temizle
+   If Not SayfaVarMi(WS_GANTT)  Then MsgBox "'" & WS_GANTT  & "' sayfasi bulunamadi!", vbCritical: GoTo Temizle
+ 
+   Call InitModel
+   Call ReadAircraftList
+   Call ReadKabiliyetMatrix
+   Call ReadVardiyaMatrix
+   Call ValidateWorkers
+   Call PrepareOutputSheets
+   Call DynamicSchedule
+   Call FormatGantt
+ 
+   Application.Calculation = xlCalculationAutomatic
+   Application.ScreenUpdating = True
+   MsgBox AircraftCount & " ucak icin plan basariyla olusturuldu!" & vbCrLf & _
+          "Vardiya Plani ve Gantt Chart sayfalarini kontrol ediniz.", vbInformation, "Plan Olusturuldu"
+   Exit Sub
+ 
+HataYonetimi:
+   Application.Calculation = xlCalculationAutomatic
+   Application.ScreenUpdating = True
+   MsgBox "HATA: " & Err.Description & vbCrLf & "Hata No: " & Err.Number, vbCritical, "Makro Hatasi"
+   Exit Sub
+ 
+Temizle:
+   Application.Calculation = xlCalculationAutomatic
+   Application.ScreenUpdating = True
+End Sub
+ 
+' ================================================================
+' MODEL BASLAT
+' ================================================================
+Private Sub InitModel()
+   Dim wsP As Worksheet
+   Set wsP = ThisWorkbook.Worksheets(WS_PARAM)
+ 
+   AlanKap  = DEFAULT_ALAN_KAP
+   KabinKap = DEFAULT_KABIN_KAP
+   If IsNumeric(wsP.Range("B5").Value) Then AlanKap  = CLng(wsP.Range("B5").Value)
+   If IsNumeric(wsP.Range("B6").Value) Then KabinKap = CLng(wsP.Range("B6").Value)
+   If IsNumeric(wsP.Range("B7").Value) Then NormalVarPerDay = CLng(wsP.Range("B7").Value)
+   If IsNumeric(wsP.Range("B8").Value) Then AcilVarPerDay   = CLng(wsP.Range("B8").Value)
+   If AlanKap  < 1 Then AlanKap  = DEFAULT_ALAN_KAP
+   If KabinKap < 1 Then KabinKap = DEFAULT_KABIN_KAP
+   If NormalVarPerDay < 1 Then NormalVarPerDay = 2
+   If AcilVarPerDay   < 1 Then AcilVarPerDay   = 3
+ 
+   ' Vardiya referans tarihi
+   If IsDate(wsP.Range("B20").Value) Then
+       VardiyaRefDate = CDate(wsP.Range("B20").Value)
+   Else
+       VardiyaRefDate = DateSerial(2026, 1, 1)
+   End If
+ 
+   ' Primer/Sealant sirasi
+   PrimerOnce = (UCase(Trim(CStr(wsP.Range("B21").Value))) = "PRIMER")
+ 
+   ' Islem tanimlari: sure ve gereken kisi sayisi
+   OpName(OP_PRIMER)  = "Primer":         OpDur(OP_PRIMER)  = 1: OpNeed(OP_PRIMER)  = 4
+   OpName(OP_VERNIK)  = "Vernik":         OpDur(OP_VERNIK)  = 1: OpNeed(OP_VERNIK)  = 2
+   OpName(OP_VTU)     = "Vernik Touchup": OpDur(OP_VTU)     = 1: OpNeed(OP_VTU)     = 4
+   OpName(OP_DISBOYA) = "Dis Boya":       OpDur(OP_DISBOYA) = 1: OpNeed(OP_DISBOYA) = 1
+   OpName(OP_EQP)     = "EQP":            OpDur(OP_EQP)     = 2: OpNeed(OP_EQP)     = 1
+   OpName(OP_FINAL)   = "Final":          OpDur(OP_FINAL)   = 2: OpNeed(OP_FINAL)   = 1
+ 
+   ' Islem sirasi
+   If PrimerOnce Then
+       StageOrder(1) = "Primer":        StageOrder(2) = "Sealant"
+   Else
+       StageOrder(1) = "Sealant":       StageOrder(2) = "Primer"
+   End If
+   StageOrder(3) = "Vernik"
+   StageOrder(4) = "Vernik Touchup"
+   StageOrder(5) = "Dis Boya"
+   StageOrder(6) = "EQP"
+   StageOrder(7) = "Final"
+End Sub
+ 
+' ================================================================
+' UCAK LİSTESİ
+' ================================================================
+Private Sub ReadAircraftList()
+   Dim ws As Worksheet, r As Long, i As Long
+   Set ws = ThisWorkbook.Worksheets(WS_GIRIS)
+ 
+   AircraftCount = 0
+   r = GIRIS_FIRST_ROW
+   Do While Trim(CStr(ws.Cells(r, 2).Value)) <> ""
+       AircraftCount = AircraftCount + 1
+       AircraftNo(AircraftCount)  = Trim(CStr(ws.Cells(r, 2).Value))
+       On Error Resume Next
+       ArrivalDate(AircraftCount) = CDate(ws.Cells(r, 3).Value)
+       DueDate(AircraftCount)     = CDate(ws.Cells(r, 4).Value)
+       On Error GoTo 0
+       PriorityVal(AircraftCount) = IIf(IsNumeric(ws.Cells(r, 5).Value), CLng(ws.Cells(r, 5).Value), 3)
+       r = r + 1
+       If AircraftCount >= MAX_AIRCRAFT Then Exit Do
+   Loop
+ 
+   If AircraftCount = 0 Then
+       MsgBox "Giris sayfasinda ucak bulunamadi!", vbExclamation
+       End
+   End If
+ 
+   ' En erken gelis tarihini bul
+   RefDate = ArrivalDate(1)
+   For i = 2 To AircraftCount
+       If ArrivalDate(i) < RefDate Then RefDate = ArrivalDate(i)
+   Next i
+ 
+   ' Vardiya numaralarini hesapla (3 vardiya/gun)
+   For i = 1 To AircraftCount
+       ArrivalShift(i) = DateDiff("d", RefDate, ArrivalDate(i)) * 3 + 1
+       DueShift(i)     = DateDiff("d", RefDate, DueDate(i)) * 3 + 3
+       StageIdx(i)     = 1
+       ReadyShift(i)   = ArrivalShift(i)
+       DoneAircraft(i) = False
+       LastLoc(i)      = ""
+   Next i
+ 
+   ' Oncelik siralaması
+   Call SortAircraft
+End Sub
+ 
+Private Sub SortAircraft()
+   Dim i As Long, j As Long
+   Dim ts As String, td As Date, tl As Long
+   For i = 1 To AircraftCount - 1
+       For j = i + 1 To AircraftCount
+           Dim swap As Boolean: swap = False
+           If PriorityVal(i) > PriorityVal(j) Then swap = True
+           If PriorityVal(i) = PriorityVal(j) And ArrivalDate(i) > ArrivalDate(j) Then swap = True
+           If PriorityVal(i) = PriorityVal(j) And ArrivalDate(i) = ArrivalDate(j) And DueDate(i) > DueDate(j) Then swap = True
+           If swap Then
+               ts = AircraftNo(i):  AircraftNo(i)  = AircraftNo(j):  AircraftNo(j)  = ts
+               td = ArrivalDate(i): ArrivalDate(i) = ArrivalDate(j): ArrivalDate(j) = td
+               td = DueDate(i):     DueDate(i)     = DueDate(j):     DueDate(j)     = td
+               tl = PriorityVal(i): PriorityVal(i) = PriorityVal(j): PriorityVal(j) = tl
+               tl = ArrivalShift(i):ArrivalShift(i)= ArrivalShift(j):ArrivalShift(j)= tl
+               tl = DueShift(i):    DueShift(i)    = DueShift(j):    DueShift(j)    = tl
+           End If
+       Next j
+   Next i
+End Sub
+ 
+' ================================================================
+' KABİLİYET MATRİSİ OKU (Ayni Excel'deki sayfa)
+' ================================================================
+Private Sub ReadKabiliyetMatrix()
+   Dim ws As Worksheet, r As Long, c As Long
+   Dim lastRow As Long, lastCol As Long
+   Dim name As String, hdr As String, op As Long, val As String
+ 
+   Set ws = ThisWorkbook.Worksheets(WS_KAB)
+ 
+   lastRow = ws.Cells(ws.Rows.Count, 2).End(xlUp).Row
+   lastCol = ws.Cells(3, ws.Columns.Count).End(xlToLeft).Column
+ 
+   WorkerCount = 0
+ 
+   ' Isci isimlerini oku (B kolonu, 4. satirdan itibaren)
+   For r = KAB_FIRST_ROW To lastRow
+       name = Trim(CStr(ws.Cells(r, 2).Value))
+       If name <> "" Then
+           WorkerCount = WorkerCount + 1
+           Workers(WorkerCount) = name
+           Dim w As Long
+           For w = 1 To MAX_OPS: Skill(WorkerCount, w) = False: Next w
+       End If
+   Next r
+ 
+   ' Yetenek kolonlarini oku (C kolonundan itibaren = kolon 3)
+   For c = 3 To lastCol
+       hdr = Trim(CStr(ws.Cells(3, c).Value))
+       op = HeaderToOp(hdr)
+       If op > 0 Then
+           Dim wi As Long: wi = 0
+           For r = KAB_FIRST_ROW To lastRow
+               name = Trim(CStr(ws.Cells(r, 2).Value))
+               If name <> "" Then
+                   wi = wi + 1
+                   val = UCase(Trim(CStr(ws.Cells(r, c).Value)))
+                   Skill(wi, op) = (val = "X")
+               End If
+           Next r
+       End If
+   Next c
+ 
+   If WorkerCount = 0 Then
+       MsgBox "Kabiliyet Matrisi sayfasinda isci bulunamadi!" & vbCrLf & _
+              "Lutfen Ad Soyad kolonunu (B) doldurunuz.", vbExclamation
+       End
+   End If
+End Sub
+ 
+Function HeaderToOp(hdr As String) As Long
+   Dim h As String: h = NormalizeText(hdr)
+   If h = NormalizeText("EQP")           Then HeaderToOp = OP_EQP:     Exit Function
+   If h = NormalizeText("Primer")        Then HeaderToOp = OP_PRIMER:  Exit Function
+   If h = NormalizeText("Vernik")        Then HeaderToOp = OP_VERNIK:  Exit Function
+   If h = NormalizeText("Vernik Touchup") Or h = NormalizeText("vernikto uchup") Or h = NormalizeText("vernikouchup") Then HeaderToOp = OP_VTU: Exit Function
+   If h = NormalizeText("Dis Boya") Or h = NormalizeText("disboya") Then HeaderToOp = OP_DISBOYA: Exit Function
+   If h = NormalizeText("Final")         Then HeaderToOp = OP_FINAL:   Exit Function
+   HeaderToOp = 0
+End Function
+ 
+' ================================================================
+' VARDİYA MATRİSİ OKU (Ayni Excel'deki sayfa)
+' ================================================================
+Private Sub ReadVardiyaMatrix()
+   Dim ws As Worksheet, r As Long, c As Long
+   Dim lastRow As Long, lastCol As Long
+   Dim name As String, code As String
+   Dim wIdx As Long, shiftIdx As Long, absShift As Long
+   Dim dayDate As Date, planDay As Long
+ 
+   Set ws = ThisWorkbook.Worksheets(WS_VAR)
+ 
+   lastRow = ws.Cells(ws.Rows.Count, VAR_NAME_COL).End(xlUp).Row
+   lastCol = ws.Cells(5, ws.Columns.Count).End(xlToLeft).Column
+ 
+   ' Tum iscileri baslangicta musait degil yap
+   Dim w As Long, s As Long
+   For w = 1 To WorkerCount
+       For s = 1 To MAX_SHIFT
+           Avail(w, s) = False
+           Busy(w, s)  = False
+       Next s
+   Next w
+ 
+   ' Veri satirlarini oku
+   For r = VAR_FIRST_ROW To lastRow
+       name = Trim(CStr(ws.Cells(r, VAR_NAME_COL).Value))
+       wIdx = WorkerIndexByName(name)
+ 
+       If wIdx > 0 Then
+           For c = VAR_DAY_COL To lastCol
+               code = UCase(Trim(CStr(ws.Cells(r, c).Value)))
+ 
+               If code = "V1" Or code = "V2" Or code = "V3" Then
+                   ' Gün tarihini hesapla (satir 2'de tarih var)
+                   ' Tarih hesabi:
+                   ' Satir 5 = gun numarasi (1-31)
+                   ' Satir 3 = ay adi (OCAK, SUBAT...) - hangi ayda oldugunu bul
+                   Dim gunNo As Long
+                   gunNo = 0
+                   If IsNumeric(ws.Cells(5, c).Value) Then gunNo = CLng(ws.Cells(5, c).Value)
+ 
+                   If gunNo >= 1 And gunNo <= 31 Then
+                       ' Ay adini bul: o kolonda veya soluna dogru merge edilmis hucreyi tara
+                       Dim ayAdi As String: ayAdi = ""
+                       Dim cc As Long
+                       For cc = c To DAY_COL_START Step -1
+                           Dim v3 As String: v3 = Trim(CStr(ws.Cells(3, cc).Value))
+                           If v3 <> "" Then ayAdi = v3: Exit For
+                       Next cc
+ 
+                       Dim ayNo As Long: ayNo = AyAdindanNo(ayAdi)
+                       If ayNo > 0 Then
+                           On Error Resume Next
+                           dayDate = DateSerial(VardiyaRefDate.Year, ayNo, gunNo)
+                           ' Eger gun gecmisteyse bir sonraki yil dene
+                           If dayDate < VardiyaRefDate Then
+                               dayDate = DateSerial(VardiyaRefDate.Year + 1, ayNo, gunNo)
+                           End If
+                           On Error GoTo 0
+                           planDay = DateDiff("d", RefDate, dayDate)
+                           If planDay >= 0 Then
+                               shiftIdx = ShiftCodeToIndex(code)
+                               absShift = planDay * 3 + shiftIdx
+                               If absShift >= 1 And absShift <= MAX_SHIFT Then
+                                   Avail(wIdx, absShift) = True
+                               End If
+                           End If
+                       End If
+                   End If
+               End If
+           Next c
+       End If
+   Next r
+End Sub
+ 
+Function ShiftCodeToIndex(code As String) As Long
+   Select Case UCase(Trim(code))
+       Case "V3": ShiftCodeToIndex = 1
+       Case "V1": ShiftCodeToIndex = 2
+       Case "V2": ShiftCodeToIndex = 3
+       Case Else: ShiftCodeToIndex = 0
+   End Select
+End Function
+ 
+Function WorkerIndexByName(name As String) As Long
+   Dim i As Long, n1 As String, n2 As String
+   n1 = NormalizeText(name)
+   For i = 1 To WorkerCount
+       n2 = NormalizeText(Workers(i))
+       If n1 = n2 Then WorkerIndexByName = i: Exit Function
+   Next i
+   WorkerIndexByName = 0
+End Function
+ 
+' ================================================================
+' ISCI VALIDASYON
+' ================================================================
+Private Sub ValidateWorkers()
+   Dim w As Long, op As Long, totalAvail As Long
+   Dim warnings As String: warnings = ""
+ 
+   For op = 1 To MAX_OPS
+       Dim cnt As Long: cnt = 0
+       For w = 1 To WorkerCount
+           If Skill(w, op) Then cnt = cnt + 1
+       Next w
+       If cnt = 0 Then
+           warnings = warnings & "- " & OpName(op) & " icin yetenekli isci yok!" & vbCrLf
+       ElseIf cnt < OpNeed(op) Then
+           warnings = warnings & "- " & OpName(op) & ": " & cnt & " yetenekli isci var, " & OpNeed(op) & " gerekiyor!" & vbCrLf
+       End If
+   Next op
+ 
+   ' Toplam musait vardiya kontrolu
+   totalAvail = 0
+   For w = 1 To WorkerCount
+       Dim s As Long
+       For s = 1 To MAX_SHIFT
+           If Avail(w, s) Then totalAvail = totalAvail + 1
+       Next s
+   Next w
+ 
+   If totalAvail = 0 Then
+       MsgBox "Vardiya Matrisi sayfasinda hicbir vardiya ataması bulunamadi!" & vbCrLf & _
+              "Ad Soyad kolonunun Kabiliyet Matrisi ile ayni oldugunu kontrol edin.", vbExclamation
+       End
+   End If
+ 
+   If warnings <> "" Then
+       If MsgBox("Uyarilar:" & vbCrLf & warnings & vbCrLf & "Devam edilsin mi?", vbYesNo + vbExclamation) = vbNo Then End
+   End If
+End Sub
+ 
+' ================================================================
+' DİNAMİK ZAMANLAMA
+' ================================================================
+Private Sub DynamicSchedule()
+   Dim iter As Long, ac As Long, bestAc As Long
+   Dim bestScore As Double, sc As Double
+   Dim cStart As Long, cEnd As Long, cLoc As String, cType As String, cOp As Long
+   Dim bStart As Long, bEnd As Long, bLoc As String, bType As String, bOp As Long
+   Dim found As Boolean
+ 
+   For iter = 1 To 50000
+       found = False
+       bestScore = 1E+30
+       bestAc = 0
+ 
+       ' Tum ucaklarin bir sonraki adayini bul, en iyisini sec
+       For ac = 1 To AircraftCount
+           If Not DoneAircraft(ac) Then
+               If GetCandidate(ac, cType, cOp, cStart, cEnd, cLoc) Then
+                   ' Skor: once erken baslangic, sonra oncelik, sonra gelis, sonra teslim
+                   sc = cStart * 100000# + PriorityVal(ac) * 1000# + ArrivalShift(ac) * 10# + DueShift(ac)
+                   If sc < bestScore Then
+                       bestScore = sc: bestAc = ac
+                       bType = cType: bOp = cOp
+                       bStart = cStart: bEnd = cEnd: bLoc = cLoc
+                       found = True
+                   End If
+               End If
+           End If
+       Next ac
+ 
+       If Not found Then Exit For
+       Call ApplyCandidate(bestAc, bType, bOp, bStart, bEnd, bLoc)
+   Next iter
+End Sub
+ 
+Function GetCandidate(ac As Long, ByRef cType As String, ByRef cOp As Long, ByRef cStart As Long, ByRef cEnd As Long, ByRef cLoc As String) As Boolean
+   If StageIdx(ac) > 7 Then DoneAircraft(ac) = True: GetCandidate = False: Exit Function
+ 
+   Dim st As String: st = StageOrder(StageIdx(ac))
+   Dim locPref(1 To 2) As String
+ 
+   Select Case st
+       Case "Sealant"
+           cType = "SEALANT": cOp = 0
+           cStart = ReadyShift(ac): cEnd = cStart + 1: cLoc = "-"
+           GetCandidate = True
+ 
+       Case "Primer"
+           Call BuildLocPref(ac, locPref)
+           cType = "NORMAL": cOp = OP_PRIMER
+           GetCandidate = FindNormalSlot(ac, OP_PRIMER, ReadyShift(ac), locPref, cStart, cEnd, cLoc)
+ 
+       Case "Vernik"
+           locPref(1) = "Kabin": locPref(2) = ""
+           cType = "NORMAL": cOp = OP_VERNIK
+           GetCandidate = FindNormalSlot(ac, OP_VERNIK, ReadyShift(ac), locPref, cStart, cEnd, cLoc)
+ 
+       Case "Vernik Touchup"
+           Call BuildLocPref(ac, locPref)
+           cType = "NORMAL": cOp = OP_VTU
+           GetCandidate = FindNormalSlot(ac, OP_VTU, ReadyShift(ac), locPref, cStart, cEnd, cLoc)
+ 
+       Case "Dis Boya"
+           locPref(1) = "Kabin": locPref(2) = ""
+           cType = "NORMAL": cOp = OP_DISBOYA
+           GetCandidate = FindNormalSlot(ac, OP_DISBOYA, ArrivalShift(ac), locPref, cStart, cEnd, cLoc)
+ 
+       Case "EQP"
+           cType = "EQP": cOp = OP_EQP
+           GetCandidate = FindEQPSlot(ac, cStart, cEnd, cLoc)
+ 
+       Case "Final"
+           Call BuildLocPref(ac, locPref)
+           cType = "NORMAL": cOp = OP_FINAL
+           GetCandidate = FindNormalSlot(ac, OP_FINAL, ReadyShift(ac), locPref, cStart, cEnd, cLoc)
+   End Select
+End Function
+ 
+Private Sub BuildLocPref(ac As Long, ByRef locPref() As String)
+   If LastLoc(ac) = "Kabin" Then
+       locPref(1) = "Kabin": locPref(2) = "Alan"
+   Else
+       locPref(1) = "Alan": locPref(2) = "Kabin"
+   End If
+End Sub
+ 
+Function FindNormalSlot(ac As Long, op As Long, earliest As Long, locPref() As String, ByRef sOut As Long, ByRef eOut As Long, ByRef locOut As String) As Boolean
+   Dim k As Long, s As Long, loc As String, dur As Long
+   dur = OpDur(op)
+ 
+   For k = 1 To 2
+       loc = locPref(k)
+       If loc = "" Then GoTo NextLoc
+ 
+       For s = earliest To MAX_SHIFT - dur + 1
+           ' Dis Boya Sealant cakisma kontrolu
+           If op = OP_DISBOYA And SealantConflict(ac, s, dur) Then GoTo NextShift
+           ' Lokasyon kapasitesi
+           If Not LocationOK(loc, s, dur) Then GoTo NextShift
+           ' Ucak baska is yapiyor mu
+           If Not AircraftFree(ac, s, dur) Then GoTo NextShift
+           ' Yeterli musait isci var mi
+           If Not WorkersOK(op, s, dur, OpNeed(op)) Then GoTo NextShift
+ 
+           sOut = s: eOut = s + dur - 1: locOut = loc
+           FindNormalSlot = True: Exit Function
+NextShift:
+       Next s
+NextLoc:
+   Next k
+ 
+   FindNormalSlot = False
+End Function
+ 
+Function LocationOK(loc As String, s As Long, dur As Long) As Boolean
+   Dim t As Long
+   For t = s To s + dur - 1
+       If t > MAX_SHIFT Then LocationOK = False: Exit Function
+       If loc = "Alan"  And AlanDolu(t)  >= AlanKap  Then LocationOK = False: Exit Function
+       If loc = "Kabin" And KabinDolu(t) >= KabinKap Then LocationOK = False: Exit Function
+   Next t
+   LocationOK = True
+End Function
+ 
+Function AircraftFree(ac As Long, s As Long, dur As Long) As Boolean
+   Dim t As Long
+   For t = s To s + dur - 1
+       If AircraftLoc(ac, t) <> "" Then AircraftFree = False: Exit Function
+   Next t
+   AircraftFree = True
+End Function
+ 
+Function SealantConflict(ac As Long, s As Long, dur As Long) As Boolean
+   Dim t As Long
+   For t = s To s + dur - 1
+       If SealantActive(ac, t) Then SealantConflict = True: Exit Function
+   Next t
+   SealantConflict = False
+End Function
+ 
+Function WorkersOK(op As Long, s As Long, dur As Long, need As Long) As Boolean
+   Dim t As Long
+   For t = s To s + dur - 1
+       If CountFreeWorkers(op, t) < need Then WorkersOK = False: Exit Function
+   Next t
+   WorkersOK = True
+End Function
+ 
+Function CountFreeWorkers(op As Long, shiftNo As Long) As Long
+   Dim w As Long, cnt As Long
+   For w = 1 To WorkerCount
+       If Skill(w, op) And Avail(w, shiftNo) And Not Busy(w, shiftNo) Then cnt = cnt + 1
+   Next w
+   CountFreeWorkers = cnt
+End Function
+ 
+' EQP: 2 vardiya, ayni kisi her iki vardiyada da olmali
+Function FindEQPSlot(ac As Long, ByRef sOut As Long, ByRef eOut As Long, ByRef locOut As String) As Boolean
+   Dim s As Long, w As Long, p As Long
+   Dim loc1 As String, loc2 As String
+   Dim patterns(1 To 4, 1 To 2) As String
+ 
+   patterns(1, 1) = "Alan":  patterns(1, 2) = "Kabin"
+   patterns(2, 1) = "Alan":  patterns(2, 2) = "Alan"
+   patterns(3, 1) = "Kabin": patterns(3, 2) = "Kabin"
+   patterns(4, 1) = "Kabin": patterns(4, 2) = "Alan"
+ 
+   For s = ReadyShift(ac) To MAX_SHIFT - 1
+       ' Ayni iscinin her iki vardiyada da musait olup olmadigini kontrol et
+       Dim eqpWorker As Long: eqpWorker = FindEQPWorker(s)
+       If eqpWorker > 0 Then
+           For p = 1 To 4
+               loc1 = patterns(p, 1): loc2 = patterns(p, 2)
+               If EQPLocOK(ac, loc1, s) And EQPLocOK(ac, loc2, s + 1) Then
+                   sOut = s: eOut = s + 1: locOut = loc1 & "-" & loc2
+                   FindEQPSlot = True: Exit Function
+               End If
+           Next p
+       End If
+   Next s
+   FindEQPSlot = False
+End Function
+ 
+Function FindEQPWorker(s As Long) As Long
+   Dim w As Long
+   For w = 1 To WorkerCount
+       If Skill(w, OP_EQP) And Avail(w, s) And Avail(w, s + 1) And Not Busy(w, s) And Not Busy(w, s + 1) Then
+           FindEQPWorker = w: Exit Function
+       End If
+   Next w
+   FindEQPWorker = 0
+End Function
+ 
+Function EQPLocOK(ac As Long, loc As String, s As Long) As Boolean
+   If AircraftLoc(ac, s) = loc Then EQPLocOK = True: Exit Function
+   If AircraftLoc(ac, s) = "" Then
+       If loc = "Alan"  And AlanDolu(s)  < AlanKap  Then EQPLocOK = True: Exit Function
+       If loc = "Kabin" And KabinDolu(s) < KabinKap Then EQPLocOK = True: Exit Function
+   End If
+   EQPLocOK = False
+End Function
+ 
+' ================================================================
+' ADAY UYGULA
+' ================================================================
+Private Sub ApplyCandidate(ac As Long, cType As String, op As Long, s As Long, e As Long, loc As String)
+   Select Case cType
+       Case "SEALANT"
+           Dim t As Long
+           For t = s To e: SealantActive(ac, t) = True: Next t
+           Call WritePlanRow(AircraftNo(ac), "Sealant", "-", s, e, "-", PriorityVal(ac), DueShift(ac), "Sealant Blogu")
+           ReadyShift(ac) = e + 1
+ 
+       Case "NORMAL"
+           Call ReserveLocation(ac, loc, s, e)
+           Call ReserveWorkers(op, s, e, OpNeed(op))
+           Dim workerTxt As String: workerTxt = GetWorkerText(op, s, e, OpNeed(op))
+           Call WritePlanRow(AircraftNo(ac), OpName(op), loc, s, e, workerTxt, PriorityVal(ac), DueShift(ac), "Normal")
+           LastLoc(ac) = loc
+           ReadyShift(ac) = e + 1
+ 
+       Case "EQP"
+           Call ApplyEQP(ac, s, loc)
+           ReadyShift(ac) = e + 1
+   End Select
+ 
+   StageIdx(ac) = StageIdx(ac) + 1
+   If StageIdx(ac) > 7 Then DoneAircraft(ac) = True
+End Sub
+ 
+Private Sub ApplyEQP(ac As Long, s As Long, locPattern As String)
+   Dim parts() As String: parts = Split(locPattern, "-")
+   Dim loc1 As String: loc1 = parts(0)
+   Dim loc2 As String: loc2 = parts(1)
+   Dim worker As Long: worker = FindEQPWorker(s)
+   If worker = 0 Then Exit Sub
+ 
+   ' Lokasyon ve isci rezervasyonu
+   Call ReserveOneShift(ac, loc1, s)
+   Call ReserveOneShift(ac, loc2, s + 1)
+   Busy(worker, s) = True: Busy(worker, s + 1) = True
+ 
+   Dim wtxt As String
+   wtxt = "V" & s & ": " & Workers(worker) & " | V" & (s+1) & ": " & Workers(worker)
+   Call WritePlanRow(AircraftNo(ac), "EQP", loc1 & "->" & loc2, s, s + 1, wtxt, PriorityVal(ac), DueShift(ac), "EQP (2 vardiya)")
+   LastLoc(ac) = loc2
+End Sub
+ 
+Private Sub ReserveLocation(ac As Long, loc As String, s As Long, e As Long)
+   Dim t As Long
+   For t = s To e
+       If loc = "Alan"  Then AlanDolu(t)  = AlanDolu(t)  + 1
+       If loc = "Kabin" Then KabinDolu(t) = KabinDolu(t) + 1
+       AircraftLoc(ac, t) = loc
+   Next t
+End Sub
+ 
+Private Sub ReserveOneShift(ac As Long, loc As String, s As Long)
+   If AircraftLoc(ac, s) = "" Then
+       If loc = "Alan"  Then AlanDolu(s)  = AlanDolu(s)  + 1
+       If loc = "Kabin" Then KabinDolu(s) = KabinDolu(s) + 1
+       AircraftLoc(ac, s) = loc
+   End If
+End Sub
+ 
+Private Sub ReserveWorkers(op As Long, s As Long, e As Long, need As Long)
+   Dim t As Long, w As Long, cnt As Long
+   For t = s To e
+       cnt = 0
+       For w = 1 To WorkerCount
+           If Skill(w, op) And Avail(w, t) And Not Busy(w, t) Then
+               Busy(w, t) = True: cnt = cnt + 1
+               If cnt >= need Then Exit For
+           End If
+       Next w
+   Next t
+End Sub
+ 
+Function GetWorkerText(op As Long, s As Long, e As Long, need As Long) As String
+   Dim t As Long, w As Long, cnt As Long, txt As String
+   For t = s To e
+       cnt = 0: txt = txt & "V" & t & ": "
+       For w = 1 To WorkerCount
+           If Skill(w, op) And Avail(w, t) And Busy(w, t) Then
+               If cnt > 0 Then txt = txt & ", "
+               txt = txt & Workers(w): cnt = cnt + 1
+               If cnt >= need Then Exit For
+           End If
+       Next w
+       If t < e Then txt = txt & " | "
+   Next t
+   GetWorkerText = txt
+End Function
+ 
+' ================================================================
+' PLAN SATIRI YAZ
+' ================================================================
+Private Sub PrepareOutputSheets()
+   Dim wsP As Worksheet, wsG As Worksheet
+   Set wsP = ThisWorkbook.Worksheets(WS_PLAN)
+   Set wsG = ThisWorkbook.Worksheets(WS_GANTT)
+ 
+   wsP.Cells.Clear: wsG.Cells.Clear
+   PlanRow = 2
+ 
+   wsP.Range("A1:L1").Value = Array("Tarih", "Vardiya", "Shift No", "Bitis Shift", "Ucak", "Islem", "Konum", "Sure(V)", "Isciler", "Oncelik", "Tip", "Durum")
+   With wsP.Range("A1:L1")
+       .Interior.Color = RGB(31, 56, 100)
+       .Font.Color = vbWhite
+       .Font.Bold = True
+       .Font.Name = "Arial"
+       .HorizontalAlignment = xlCenter
+   End With
+   wsP.Row_Dimensions(1).RowHeight = 22
+End Sub
+ 
+Private Sub WritePlanRow(ucak As String, op As String, loc As String, s As Long, e As Long, workersTxt As String, pr As Long, dueS As Long, tip As String)
+   Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(WS_PLAN)
+ 
+   ws.Cells(PlanRow, 1).Value = ShiftToDate(s)
+   ws.Cells(PlanRow, 1).NumberFormat = "dd.mm.yyyy"
+   ws.Cells(PlanRow, 2).Value = ShiftToCode(s)
+   ws.Cells(PlanRow, 3).Value = s
+   ws.Cells(PlanRow, 4).Value = e
+   ws.Cells(PlanRow, 5).Value = ucak
+   ws.Cells(PlanRow, 6).Value = op
+   ws.Cells(PlanRow, 7).Value = loc
+   ws.Cells(PlanRow, 8).Value = e - s + 1
+   ws.Cells(PlanRow, 9).Value = workersTxt
+   ws.Cells(PlanRow, 10).Value = pr
+   ws.Cells(PlanRow, 11).Value = tip
+ 
+   If e <= dueS Then
+       ws.Cells(PlanRow, 12).Value = "Zamaninda"
+       ws.Cells(PlanRow, 12).Interior.Color = RGB(198, 239, 206)
+   Else
+       ws.Cells(PlanRow, 12).Value = "GECIKME RISKI!"
+       ws.Cells(PlanRow, 12).Interior.Color = RGB(255, 199, 206)
+       ws.Cells(PlanRow, 12).Font.Bold = True
+       ws.Cells(PlanRow, 12).Font.Color = RGB(192, 0, 0)
+   End If
+ 
+   ' Konum rengi
+   If loc = "Kabin" Then ws.Cells(PlanRow, 7).Interior.Color = RGB(255, 230, 153)
+   If loc = "Alan"  Then ws.Cells(PlanRow, 7).Interior.Color = RGB(198, 239, 206)
+ 
+   ' Gantt için kaydet
+   Call AddGanttData(ucak, op, loc, s, e)
+ 
+   PlanRow = PlanRow + 1
+End Sub
+ 
+Private Sub AddGanttData(ucak As String, op As String, loc As String, s As Long, e As Long)
+   Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(WS_GANTT)
+   Dim r As Long
+   r = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row + 1
+   If r < 4 Then r = 4
+   ws.Cells(r, 1).Value = ucak
+   ws.Cells(r, 2).Value = op
+   ws.Cells(r, 3).Value = loc
+   ws.Cells(r, 4).Value = s
+   ws.Cells(r, 5).Value = e
+End Sub
+ 
+' ================================================================
+' GANTT FORMAT - 3 SATIRLI BASLIK
+' Satir 1: Ay adlari
+' Satir 2: dd.mm tarihleri (dikey, her gun 3 kolon birlestir)
+' Satir 3: V3 / V1 / V2
+' ================================================================
+Private Sub FormatGantt()
+   Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(WS_GANTT)
+   Dim dataLast As Long: dataLast = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row
+   Dim arr As Variant
+ 
+   If dataLast >= 4 Then arr = ws.Range("A4:E" & dataLast).Value
+   ws.Cells.Clear
+ 
+   Dim startCol As Long: startCol = GANTT_START_COL
+   Dim totShifts As Long: totShifts = GANTT_SHIFTS
+ 
+   ' ── Sol sabit kolonlar (3 satirla birlestir) ──────────────
+   Dim fixData(1 To 3) As String
+   fixData(1) = "Ucak": fixData(2) = "Islem": fixData(3) = "Konum"
+   Dim c As Long
+   For c = 1 To 3
+       ws.Range(ws.Cells(1, c), ws.Cells(3, c)).Merge
+       With ws.Cells(1, c)
+           .Value = fixData(c)
+           .Interior.Color = RGB(31, 56, 100)
+           .Font.Color = vbWhite: .Font.Bold = True: .Font.Name = "Arial": .Font.Size = 10
+           .HorizontalAlignment = xlCenter: .VerticalAlignment = xlCenter
+       End With
+   Next c
+ 
+   ' ── SATIR 1: Ay adlari ───────────────────────────────────
+   Dim s As Long, mName As String, curMonth As String, mStart As Long
+   curMonth = "": mStart = startCol
+   For s = 1 To totShifts
+       mName = UCase(Format(ShiftToDate(s), "mmmm yyyy"))
+       c = startCol + s - 1
+       If curMonth = "" Then curMonth = mName: mStart = c
+       If mName <> curMonth Or s = totShifts Then
+           Dim mEnd As Long
+           mEnd = IIf(s = totShifts And mName = curMonth, c, c - 1)
+           ws.Range(ws.Cells(1, mStart), ws.Cells(1, mEnd)).Merge
+           With ws.Cells(1, mStart)
+               .Value = curMonth
+               .Interior.Color = RGB(31, 56, 100)
+               .Font.Color = vbWhite: .Font.Bold = True: .Font.Name = "Arial": .Font.Size = 10
+               .HorizontalAlignment = xlCenter: .VerticalAlignment = xlCenter
+           End With
+           curMonth = mName: mStart = c
+       End If
+   Next s
+ 
+   ' ── SATIR 2: Gunluk tarihler (her gun 3 kolon birlestir) ──
+   Dim dayIdx As Long, colS As Long, colE As Long, dVal As Date
+   For dayIdx = 0 To (totShifts - 1) \ 3
+       colS = startCol + dayIdx * 3
+       colE = Application.WorksheetFunction.Min(colS + 2, startCol + totShifts - 1)
+       dVal = DateAdd("d", dayIdx, RefDate)
+       ws.Range(ws.Cells(2, colS), ws.Cells(2, colE)).Merge
+       With ws.Cells(2, colS)
+           .Value = Format(dVal, "dd.mm")
+           .Orientation = 90
+           .HorizontalAlignment = xlCenter: .VerticalAlignment = xlCenter
+           .Font.Bold = True: .Font.Name = "Arial": .Font.Size = 8
+           .Interior.Color = IIf(dayIdx Mod 2 = 0, RGB(46, 117, 182), RGB(68, 114, 196))
+           .Font.Color = vbWhite
+       End With
+   Next dayIdx
+ 
+   ' ── SATIR 3: V3 / V1 / V2 ────────────────────────────────
+   Dim vLabels(1 To 3) As String: vLabels(1) = "V3": vLabels(2) = "V1": vLabels(3) = "V2"
+   Dim vColors(1 To 3) As Long
+   vColors(1) = RGB(46, 117, 182): vColors(2) = RGB(68, 114, 196): vColors(3) = RGB(91, 155, 213)
+   For s = 1 To totShifts
+       c = startCol + s - 1
+       Dim vi As Long: vi = ((s - 1) Mod 3) + 1
+       With ws.Cells(3, c)
+           .Value = vLabels(vi)
+           .Interior.Color = vColors(vi)
+           .Font.Color = vbWhite: .Font.Bold = True: .Font.Name = "Arial": .Font.Size = 7
+           .HorizontalAlignment = xlCenter: .VerticalAlignment = xlCenter
+       End With
+   Next s
+ 
+   ' ── Satir yukseklikleri ───────────────────────────────────
+   ws.Rows(1).RowHeight = 22
+   ws.Rows(2).RowHeight = 55
+   ws.Rows(3).RowHeight = 16
+ 
+   ' ── Veri satirlari ───────────────────────────────────────
+   If IsEmpty(arr) Then GoTo Bitir
+ 
+   Dim outR As Long: outR = 4
+   Dim r As Long, ucak As String, op As String, loc As String, st As Long, en As Long
+   For r = 1 To UBound(arr, 1)
+       ucak = CStr(arr(r, 1)): op = CStr(arr(r, 2))
+       loc  = CStr(arr(r, 3)): st = CLng(arr(r, 4)): en = CLng(arr(r, 5))
+ 
+       ws.Cells(outR, 1).Value = ucak
+       ws.Cells(outR, 2).Value = op
+       ws.Cells(outR, 3).Value = loc
+ 
+       For s = st To en
+           If s <= totShifts Then
+               c = startCol + s - 1
+               Dim cv As String
+               If loc = "Kabin" Then cv = "K"
+               If loc = "Alan"  Then cv = "A"
+               If loc = "-"     Then cv = "S"
+               If InStr(loc, "->") > 0 Then cv = "E"
+               ws.Cells(outR, c).Value = cv
+               ws.Cells(outR, c).Interior.Color = AircraftColor(ucak, op)
+               ws.Cells(outR, c).Font.Color = vbWhite
+               ws.Cells(outR, c).Font.Bold = True
+               ws.Cells(outR, c).Font.Size = 7
+               ws.Cells(outR, c).HorizontalAlignment = xlCenter
+           End If
+       Next s
+       ws.Rows(outR).RowHeight = 16
+       outR = outR + 1
+   Next r
+ 
+Bitir:
+   ' Sutun genislikleri
+   ws.Columns(1).ColumnWidth = 10
+   ws.Columns(2).ColumnWidth = 14
+   ws.Columns(3).ColumnWidth = 8
+   For c = startCol To startCol + totShifts - 1
+       ws.Columns(c).ColumnWidth = 3.2
+   Next c
+ 
+   ' Dondur: ucak/islem/konum sabit kalsin
+   ws.Activate
+   ActiveWindow.FreezePanes = False
+   ws.Cells(4, startCol).Select
+   ActiveWindow.FreezePanes = True
+End Sub
+ 
+' ================================================================
+' YARDIMCI FONKSİYONLAR
+' ================================================================
+Function ShiftToDate(absShift As Long) As Date
+   ShiftToDate = DateAdd("d", (absShift - 1) \ 3, RefDate)
+End Function
+ 
+Function ShiftToCode(absShift As Long) As String
+   Select Case ((absShift - 1) Mod 3) + 1
+       Case 1: ShiftToCode = "V3"
+       Case 2: ShiftToCode = "V1"
+       Case 3: ShiftToCode = "V2"
+   End Select
+End Function
+ 
+Function AircraftColor(ucak As String, op As String) As Long
+   If op = "Sealant" Then AircraftColor = RGB(166, 166, 166): Exit Function
+   Dim n As Long, i As Long
+   For i = 1 To Len(ucak)
+       If Mid(ucak, i, 1) Like "#" Then n = n + CLng(Mid(ucak, i, 1))
+   Next i
+   Select Case n Mod 10
+       Case 0: AircraftColor = RGB(68, 114, 196)
+       Case 1: AircraftColor = RGB(237, 125, 49)
+       Case 2: AircraftColor = RGB(112, 173, 71)
+       Case 3: AircraftColor = RGB(192, 0, 0)
+       Case 4: AircraftColor = RGB(112, 48, 160)
+       Case 5: AircraftColor = RGB(0, 176, 240)
+       Case 6: AircraftColor = RGB(146, 208, 80)
+       Case 7: AircraftColor = RGB(255, 102, 255)
+       Case 8: AircraftColor = RGB(0, 112, 192)
+       Case Else: AircraftColor = RGB(255, 0, 0)
+   End Select
+End Function
+ 
+Function NormalizeText(s As String) As String
+   s = LCase(Trim(CStr(s)))
+   s = Replace(s, Chr(305), "i"): s = Replace(s, Chr(304), "i")
+   s = Replace(s, Chr(287), "g"): s = Replace(s, Chr(286), "g")
+   s = Replace(s, Chr(252), "u"): s = Replace(s, Chr(220), "u")
+   s = Replace(s, Chr(351), "s"): s = Replace(s, Chr(350), "s")
+   s = Replace(s, Chr(246), "o"): s = Replace(s, Chr(214), "o")
+   s = Replace(s, Chr(231), "c"): s = Replace(s, Chr(199), "c")
+   s = Replace(s, " ", ""): s = Replace(s, "/", "")
+   s = Replace(s, "-", ""): s = Replace(s, "_", "")
+   s = Replace(s, ".", "")
+   NormalizeText = s
+End Function
+ 
+ 
+' ================================================================
+' AY ADI -> AY NUMARASI
+' ================================================================
+Function AyAdindanNo(ayAdi As String) As Long
+   Dim a As String: a = UCase(Trim(ayAdi))
+   ' Turkce normalize
+   a = Replace(a, Chr(305), "I"): a = Replace(a, Chr(350), "S")
+   a = Replace(a, Chr(220), "U"): a = Replace(a, Chr(214), "O")
+   a = Replace(a, Chr(199), "C"): a = Replace(a, Chr(286), "G")
+ 
+   Select Case Left(a, 3)
+       Case "OCA": AyAdindanNo = 1
+       Case "SUB", "ŞUB": AyAdindanNo = 2
+       Case "MAR": AyAdindanNo = 3
+       Case "NIS": AyAdindanNo = 4
+       Case "MAY": AyAdindanNo = 5
+       Case "HAZ": AyAdindanNo = 6
+       Case "TEM": AyAdindanNo = 7
+       Case "AGU", "AĞU": AyAdindanNo = 8
+       Case "EYL": AyAdindanNo = 9
+       Case "EKI", "EKİ": AyAdindanNo = 10
+       Case "KAS": AyAdindanNo = 11
+       Case "ARA": AyAdindanNo = 12
+       Case Else:  AyAdindanNo = 0
+   End Select
+End Function
+ 
+Function SayfaVarMi(sayfaAdi As String) As Boolean
+   Dim ws As Worksheet
+   For Each ws In ThisWorkbook.Worksheets
+       If ws.Name = sayfaAdi Then SayfaVarMi = True: Exit Function
+   Next ws
+   SayfaVarMi = False
+End Function
+ 
+ 
+' ================================================================
+' TAKVİM GÜNCELLE
+' Parametreler!B20'deki tarihe gore Vardiya Matrisi basliklarini
+' yeniden olusturur. Personel verileri (satir 7+) korunur.
+' ================================================================
+Sub TakvimiGuncelle()
+   On Error GoTo Hata
+ 
+   If Not SayfaVarMi(WS_PARAM) Then MsgBox "Parametreler sayfasi bulunamadi!", vbCritical: Exit Sub
+   If Not SayfaVarMi(WS_VAR)   Then MsgBox "Vardiya Matrisi sayfasi bulunamadi!", vbCritical: Exit Sub
+ 
+   Dim wsP As Worksheet: Set wsP = ThisWorkbook.Worksheets(WS_PARAM)
+   Dim ws  As Worksheet: Set ws  = ThisWorkbook.Worksheets(WS_VAR)
+ 
+   ' Baslangic tarihini oku
+   If Not IsDate(wsP.Range("B20").Value) Then
+       MsgBox "Parametreler!B20 gecerli bir tarih degil!" & vbCrLf & _
+              "Ornek: 01.01.2027", vbExclamation
+       Exit Sub
+   End If
+ 
+   Dim refD As Date: refD = CDate(wsP.Range("B20").Value)
+   ' Ayin ilk gunune yuvarla
+   refD = DateSerial(Year(refD), Month(refD), 1)
+ 
+   Dim numDays As Long: numDays = 365
+   Dim dayColStart As Long: dayColStart = VAR_DAY_COL
+ 
+   Application.ScreenUpdating = False
+ 
+   ' ── Satir 3-6 araligini temizle (baslıklar), veri satirlarini koru ──
+   Dim c As Long
+   ' Once satir 3-6 araligindaki gun kolonlarini temizle
+   For c = dayColStart To dayColStart + numDays - 1
+       ws.Cells(3, c).Value = ""
+       ws.Cells(3, c).Interior.ColorIndex = xlNone
+       ws.Cells(4, c).Value = ""
+       ws.Cells(4, c).Interior.ColorIndex = xlNone
+       ws.Cells(5, c).Value = ""
+       ws.Cells(6, c).Value = ""
+   Next c
+ 
+   ' Birlesmeleri kaldir
+   Dim rng As Range
+   On Error Resume Next
+   Set rng = ws.Range(ws.Cells(3, dayColStart), ws.Cells(4, dayColStart + numDays - 1))
+   rng.UnMerge
+   On Error GoTo Hata
+ 
+   ' ── SATIR 3: Ay adlari ───────────────────────────────────
+   Dim MONTH_COLORS(0 To 11) As String
+   MONTH_COLORS(0)  = "1F3864": MONTH_COLORS(1)  = "2E75B6"
+   MONTH_COLORS(2)  = "1F3864": MONTH_COLORS(3)  = "2E75B6"
+   MONTH_COLORS(4)  = "1F3864": MONTH_COLORS(5)  = "2E75B6"
+   MONTH_COLORS(6)  = "1F3864": MONTH_COLORS(7)  = "2E75B6"
+   MONTH_COLORS(8)  = "1F3864": MONTH_COLORS(9)  = "2E75B6"
+   MONTH_COLORS(10) = "1F3864": MONTH_COLORS(11) = "2E75B6"
+ 
+   Dim curMonth As Long, curYear As Long
+   Dim monthStartCol As Long, monthIdx As Long
+   Dim d As Long, dayDate As Date, col As Long
+ 
+   curMonth = -1: monthStartCol = dayColStart: monthIdx = 0
+ 
+   For d = 0 To numDays - 1
+       col = dayColStart + d
+       dayDate = refD + d
+ 
+       If Month(dayDate) <> curMonth Or Year(dayDate) <> curYear Then
+           ' Onceki ayi kapat
+           If curMonth > 0 Then
+               If col - 1 >= monthStartCol Then
+                   ws.Range(ws.Cells(3, monthStartCol), ws.Cells(3, col - 1)).Merge
+               End If
+               With ws.Cells(3, monthStartCol)
+                   .Value = UCase(MonthName(curMonth, False))
+                   .Interior.Color = RGB(HexToR(MONTH_COLORS(monthIdx Mod 12)), _
+                                        HexToG(MONTH_COLORS(monthIdx Mod 12)), _
+                                        HexToB(MONTH_COLORS(monthIdx Mod 12)))
+                   .Font.Name = "Calibri": .Font.Bold = True
+                   .Font.Color = RGB(255, 255, 255): .Font.Size = 11
+                   .HorizontalAlignment = xlCenter: .VerticalAlignment = xlCenter
+               End With
+               monthIdx = monthIdx + 1
+           End If
+           curMonth = Month(dayDate)
+           curYear  = Year(dayDate)
+           monthStartCol = col
+       End If
+   Next d
+   ' Son ayi kapat
+   ws.Range(ws.Cells(3, monthStartCol), ws.Cells(3, dayColStart + numDays - 1)).Merge
+   With ws.Cells(3, monthStartCol)
+       .Value = UCase(MonthName(curMonth, False))
+       .Interior.Color = RGB(HexToR(MONTH_COLORS(monthIdx Mod 12)), _
+                              HexToG(MONTH_COLORS(monthIdx Mod 12)), _
+                              HexToB(MONTH_COLORS(monthIdx Mod 12)))
+       .Font.Name = "Calibri": .Font.Bold = True
+       .Font.Color = RGB(255, 255, 255): .Font.Size = 11
+       .HorizontalAlignment = xlCenter: .VerticalAlignment = xlCenter
+   End With
+ 
+   ' ── SATIR 4: Hafta numaralari ─────────────────────────────
+   Dim curWeek As Long, weekStartCol As Long, weekIdx As Long
+   curWeek = -1: weekStartCol = dayColStart: weekIdx = 0
+   Dim WEEK_COLORS(0 To 1) As String
+   WEEK_COLORS(0) = "BDD7EE": WEEK_COLORS(1) = "DEEAF1"
+ 
+   For d = 0 To numDays - 1
+       col = dayColStart + d
+       dayDate = refD + d
+       Dim wk As Long: wk = GetWeekNumber(dayDate)
+ 
+       If wk <> curWeek Then
+           If curWeek > 0 Then
+               If col - 1 >= weekStartCol Then
+                   ws.Range(ws.Cells(4, weekStartCol), ws.Cells(4, col - 1)).Merge
+               End If
+               With ws.Cells(4, weekStartCol)
+                   .Value = (weekIdx + 1) & ". HAFTA"
+                   .Interior.Color = RGB(HexToR(WEEK_COLORS(weekIdx Mod 2)), _
+                                        HexToG(WEEK_COLORS(weekIdx Mod 2)), _
+                                        HexToB(WEEK_COLORS(weekIdx Mod 2)))
+                   .Font.Name = "Calibri": .Font.Bold = True
+                   .Font.Color = RGB(31, 56, 100): .Font.Size = 8
+                   .HorizontalAlignment = xlCenter: .VerticalAlignment = xlCenter
+               End With
+               weekIdx = weekIdx + 1
+           End If
+           curWeek = wk: weekStartCol = col
+       End If
+   Next d
+   ' Son haftayi kapat
+   ws.Range(ws.Cells(4, weekStartCol), ws.Cells(4, dayColStart + numDays - 1)).Merge
+   With ws.Cells(4, weekStartCol)
+       .Value = (weekIdx + 1) & ". HAFTA"
+       .Interior.Color = RGB(HexToR(WEEK_COLORS(weekIdx Mod 2)), _
+                              HexToG(WEEK_COLORS(weekIdx Mod 2)), _
+                              HexToB(WEEK_COLORS(weekIdx Mod 2)))
+       .Font.Name = "Calibri": .Font.Bold = True
+       .Font.Color = RGB(31, 56, 100): .Font.Size = 8
+       .HorizontalAlignment = xlCenter: .VerticalAlignment = xlCenter
+   End With
+ 
+   ' ── SATIR 5: Gun numaralari ───────────────────────────────
+   For d = 0 To numDays - 1
+       col = dayColStart + d
+       dayDate = refD + d
+       Dim isWeekend As Boolean: isWeekend = (Weekday(dayDate, vbMonday) >= 6)
+       With ws.Cells(5, col)
+           .Value = Day(dayDate)
+           .Interior.Color = IIf(isWeekend, RGB(252, 228, 214), RGB(237, 237, 237))
+           .Font.Name = "Calibri": .Font.Bold = True: .Font.Size = 8
+           .Font.Color = RGB(31, 56, 100)
+           .HorizontalAlignment = xlCenter: .VerticalAlignment = xlCenter
+       End With
+   Next d
+ 
+   ' ── SATIR 6: Gun adlari (dikey) ───────────────────────────
+   Dim gunAdlari(0 To 6) As String
+   gunAdlari(0) = "PAZARTESİ": gunAdlari(1) = "SALI":      gunAdlari(2) = "ÇARŞAMBA"
+   gunAdlari(3) = "PERŞEMBE":  gunAdlari(4) = "CUMA":      gunAdlari(5) = "CUMARTESİ"
+   gunAdlari(6) = "PAZAR"
+ 
+   For d = 0 To numDays - 1
+       col = dayColStart + d
+       dayDate = refD + d
+       Dim wdIdx As Long: wdIdx = Weekday(dayDate, vbMonday) - 1
+       isWeekend = (wdIdx >= 5)
+       With ws.Cells(6, col)
+           .Value = gunAdlari(wdIdx)
+           .Interior.Color = IIf(isWeekend, RGB(252, 228, 214), RGB(255, 255, 255))
+           .Font.Name = "Calibri": .Font.Bold = True: .Font.Size = 7
+           .Font.Color = RGB(31, 56, 100)
+           .Orientation = 90
+           .HorizontalAlignment = xlCenter: .VerticalAlignment = xlBottom
+       End With
+   Next d
+ 
+   Application.ScreenUpdating = True
+   MsgBox "Takvim " & Year(refD) & " yilina guncellendi!" & vbCrLf & _
+          "Personel verileri korundu. Vardiya atamalarini kontrol ediniz.", _
+          vbInformation, "Takvim Guncellendi"
+   Exit Sub
+ 
+Hata:
+   Application.ScreenUpdating = True
+   MsgBox "HATA: " & Err.Description, vbCritical
+End Sub
+ 
+' ── Yardimci: Hex rengi R/G/B parcalara ayir ──────────────────
+Function HexToR(hex As String) As Long
+   HexToR = CLng("&H" & Left(hex, 2))
+End Function
+Function HexToG(hex As String) As Long
+   HexToG = CLng("&H" & Mid(hex, 3, 2))
+End Function
+Function HexToB(hex As String) As Long
+   HexToB = CLng("&H" & Right(hex, 2))
+End Function
+ 
+' ── Yardimci: Hafta numarasi hesapla ──────────────────────────
+Function GetWeekNumber(d As Date) As Long
+   GetWeekNumber = DatePart("ww", d, vbMonday, vbFirstFourDays)
+End Function
+ 
+Sub PlaniTemizle()
+   If MsgBox("Plan ve Gantt temizlenecek. Emin misiniz?", vbYesNo + vbQuestion) = vbYes Then
+       With ThisWorkbook.Worksheets(WS_PLAN)
+           .Rows(PLAN_FIRST_ROW & ":" & .Rows.Count).ClearContents
+           .Rows(PLAN_FIRST_ROW & ":" & .Rows.Count).Interior.ColorIndex = xlNone
+       End With
+       With ThisWorkbook.Worksheets(WS_GANTT)
+           .Rows("4:" & .Rows.Count).ClearContents
+           .Rows("4:" & .Rows.Count).Interior.ColorIndex = xlNone
+       End With
+       MsgBox "Plan temizlendi.", vbInformation
+   End If
+End Sub
+ 
+Sub GecikmeKontrol()
+   Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(WS_PLAN)
+   Dim r As Long, cnt As Long: cnt = 0
+   r = PLAN_FIRST_ROW
+   Do While ws.Cells(r, 1).Value <> ""
+       If InStr(ws.Cells(r, 12).Value, "GECIKME") > 0 Then cnt = cnt + 1
+       r = r + 1
+   Loop
+   If cnt = 0 Then
+       MsgBox "Gecikme riski bulunmamaktadir.", vbInformation
+   Else
+       MsgBox cnt & " satirda gecikme riski var! Kirmizi satirlari inceleyiniz.", vbExclamation
+   End If
